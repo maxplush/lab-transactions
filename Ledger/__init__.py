@@ -61,36 +61,54 @@ class Ledger:
             sql = sql.bindparams(account_id=account_id)
             logging.debug(sql)
             self.connection.execute(sql)
-
-    def transfer_funds(
-            self,
-            debit_account_id,
-            credit_account_id,
-            amount
-            ):
+    def transfer_funds(self, debit_account_id, credit_account_id, amount):
         '''
-        This function adds a row to the "transactions" table with the specified input values.
-        It also updates the "balances" table to apply the debits and credits to the appropriate accounts.
-        Notice that in order to do an UPDATE command to apply the credits/debits, we first need to run a SELECT command to get the current balance.
+        Transfers funds between two accounts using double-entry bookkeeping.
+        Ensures that the sum of all balances remains zero after the transaction.
         '''
 
-        # insert the transaction
-        sql = text(f'INSERT INTO transactions (debit_account_id, credit_account_id, amount) VALUES ({debit_account_id}, {credit_account_id}, {amount});')
-        logging.debug(sql)
-        self.connection.execute(sql)
-        self.connection.commit()
+        # BEGIN transaction (implicitly starts with first execute)
+        try:
+            # 🚨 Lock balances table for exclusive access
+            sql = text('LOCK TABLE balances IN ACCESS EXCLUSIVE MODE;')
+            logging.debug(sql)
+            self.connection.execute(sql)
 
-        # update the debit account balance
-        sql = text(f'SELECT balance FROM balances WHERE account_id = {debit_account_id};')
-        logging.debug(sql)
-        results = self.connection.execute(sql)
-        debit_account_balance = results.first()[0]
+            # Insert the transaction record
+            sql = text(
+                f'INSERT INTO transactions (debit_account_id, credit_account_id, amount) '
+                f'VALUES ({debit_account_id}, {credit_account_id}, {amount});'
+            )
+            logging.debug(sql)
+            self.connection.execute(sql)
 
-        debit_new_balance = debit_account_balance - amount
-        sql = text(f'UPDATE balances SET balance={debit_new_balance} WHERE account_id = {debit_account_id};')
-        logging.debug(sql)
-        self.connection.execute(sql)
-        self.connection.commit()
+            # Update debit account
+            sql = text(f'SELECT balance FROM balances WHERE account_id = {debit_account_id};')
+            logging.debug(sql)
+            results = self.connection.execute(sql)
+            debit_balance = results.first()[0]
 
-        # FIXME:
-        # you need to update the credit account balance as well
+            debit_new_balance = debit_balance - amount
+            sql = text(f'UPDATE balances SET balance = {debit_new_balance} WHERE account_id = {debit_account_id};')
+            logging.debug(sql)
+            self.connection.execute(sql)
+
+            # Update credit account
+            sql = text(f'SELECT balance FROM balances WHERE account_id = {credit_account_id};')
+            logging.debug(sql)
+            results = self.connection.execute(sql)
+            credit_balance = results.first()[0]
+
+            credit_new_balance = credit_balance + amount
+            sql = text(f'UPDATE balances SET balance = {credit_new_balance} WHERE account_id = {credit_account_id};')
+            logging.debug(sql)
+            self.connection.execute(sql)
+
+            # ✅ One final commit for all operations
+            self.connection.commit()
+
+        except Exception as e:
+            logging.error(f"Transfer failed: {e}")
+            self.connection.rollback()
+            raise
+
