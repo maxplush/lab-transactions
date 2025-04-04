@@ -1,3 +1,5 @@
+import time
+import sqlalchemy.exc
 import sqlalchemy
 from sqlalchemy.sql import text
 import os
@@ -61,54 +63,60 @@ class Ledger:
             sql = sql.bindparams(account_id=account_id)
             logging.debug(sql)
             self.connection.execute(sql)
+
     def transfer_funds(self, debit_account_id, credit_account_id, amount):
         '''
         Transfers funds between two accounts using double-entry bookkeeping.
-        Ensures that the sum of all balances remains zero after the transaction.
+        Uses row-level locks and retries on deadlock.
         '''
 
-        # BEGIN transaction (implicitly starts with first execute)
-        try:
-            # 🚨 Lock balances table for exclusive access
-            sql = text('LOCK TABLE balances IN ACCESS EXCLUSIVE MODE;')
-            logging.debug(sql)
-            self.connection.execute(sql)
+        MAX_RETRIES = 5
+        for attempt in range(MAX_RETRIES):
+            try:
+                # Begin transaction
+                # Lock rows for update (row-level locks)
+                sql = text(f'SELECT balance FROM balances WHERE account_id = {debit_account_id} FOR UPDATE;')
+                logging.debug(sql)
+                results = self.connection.execute(sql)
+                debit_balance = results.first()[0]
 
-            # Insert the transaction record
-            sql = text(
-                f'INSERT INTO transactions (debit_account_id, credit_account_id, amount) '
-                f'VALUES ({debit_account_id}, {credit_account_id}, {amount});'
-            )
-            logging.debug(sql)
-            self.connection.execute(sql)
+                sql = text(f'SELECT balance FROM balances WHERE account_id = {credit_account_id} FOR UPDATE;')
+                logging.debug(sql)
+                results = self.connection.execute(sql)
+                credit_balance = results.first()[0]
 
-            # Update debit account
-            sql = text(f'SELECT balance FROM balances WHERE account_id = {debit_account_id};')
-            logging.debug(sql)
-            results = self.connection.execute(sql)
-            debit_balance = results.first()[0]
+                # Insert transaction record
+                sql = text(
+                    f'INSERT INTO transactions (debit_account_id, credit_account_id, amount) '
+                    f'VALUES ({debit_account_id}, {credit_account_id}, {amount});'
+                )
+                logging.debug(sql)
+                self.connection.execute(sql)
 
-            debit_new_balance = debit_balance - amount
-            sql = text(f'UPDATE balances SET balance = {debit_new_balance} WHERE account_id = {debit_account_id};')
-            logging.debug(sql)
-            self.connection.execute(sql)
+                # Update balances
+                new_debit = debit_balance - amount
+                new_credit = credit_balance + amount
 
-            # Update credit account
-            sql = text(f'SELECT balance FROM balances WHERE account_id = {credit_account_id};')
-            logging.debug(sql)
-            results = self.connection.execute(sql)
-            credit_balance = results.first()[0]
+                sql = text(f'UPDATE balances SET balance = {new_debit} WHERE account_id = {debit_account_id};')
+                logging.debug(sql)
+                self.connection.execute(sql)
 
-            credit_new_balance = credit_balance + amount
-            sql = text(f'UPDATE balances SET balance = {credit_new_balance} WHERE account_id = {credit_account_id};')
-            logging.debug(sql)
-            self.connection.execute(sql)
+                sql = text(f'UPDATE balances SET balance = {new_credit} WHERE account_id = {credit_account_id};')
+                logging.debug(sql)
+                self.connection.execute(sql)
 
-            # ✅ One final commit for all operations
-            self.connection.commit()
+                # Commit transaction
+                self.connection.commit()
+                break  # Success, break out of retry loop
 
-        except Exception as e:
-            logging.error(f"Transfer failed: {e}")
-            self.connection.rollback()
-            raise
+            except sqlalchemy.exc.OperationalError as e:
+                self.connection.rollback()
+                logging.warning(f"Deadlock detected. Retry attempt {attempt + 1}...")
+                time.sleep(0.1 * (attempt + 1))  # Slight backoff
+                continue  # Try again
+
+            except Exception as e:
+                self.connection.rollback()
+                logging.error(f"Transfer failed: {e}")
+                raise
 
