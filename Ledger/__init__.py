@@ -31,7 +31,7 @@ class Ledger:
         sql = text('SELECT account_id FROM accounts;')
         logging.debug(sql)
         results = self.connection.execute(sql)
-        return [row['account_id'] for row in results.all()]
+        return [row[0] for row in results.all()]
 
     def create_account(self, name):
         '''
@@ -54,7 +54,7 @@ class Ledger:
             sql = sql.bindparams(name=name)
             logging.debug(sql)
             results = self.connection.execute(sql)
-            account_id = results.first()['account_id']
+            account_id = results.first()[0]
 
             # add the row into the "balances" table
             sql = text('INSERT INTO balances VALUES (:account_id, 0);')
@@ -75,20 +75,22 @@ class Ledger:
         '''
 
         # insert the transaction
-        sql = f'INSERT INTO transactions (debit_account_id, credit_account_id, amount) VALUES ({debit_account_id}, {credit_account_id}, {amount})'
+        sql = text(f'INSERT INTO transactions (debit_account_id, credit_account_id, amount) VALUES ({debit_account_id}, {credit_account_id}, {amount});')
         logging.debug(sql)
         self.connection.execute(sql)
+        self.connection.commit()
 
         # update the debit account balance
-        sql = f'SELECT balance FROM balances WHERE account_id = {debit_account_id}'
+        sql = text(f'SELECT balance FROM balances WHERE account_id = {debit_account_id};')
         logging.debug(sql)
         results = self.connection.execute(sql)
-        debit_account_balance = results.first()['balance']
+        debit_account_balance = results.first()[0]
 
         debit_new_balance = debit_account_balance - amount
-        sql = f'UPDATE balances SET balance={debit_new_balance} WHERE account_id = {debit_account_id}'
+        sql = text(f'UPDATE balances SET balance={debit_new_balance} WHERE account_id = {debit_account_id};')
         logging.debug(sql)
         self.connection.execute(sql)
+        self.connection.commit()
 
         # FIXME:
         # you need to update the credit account balance as well
